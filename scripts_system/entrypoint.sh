@@ -12,33 +12,39 @@ on_error() {
 }
 trap 'on_error ${LINENO} $?' ERR 2>/dev/null || true # some shells don't have ERR trap.
 
-if [ "$1" == "dontstarve_dedicated_server_nullrenderer" ] || [ "$1" == "supervisord" ]; then
+if [ "${1:-}" == "dontstarve_dedicated_server_nullrenderer" ] || [ "${1:-}" == "supervisord" ]; then
+    case "${DST_UPDATE_ON_START:-1}:${DST_UPDATE_MODS_ON_START:-1}" in
+        0:0|0:1|1:0|1:1) ;;
+        *) echo >&2 "DST_UPDATE_ON_START and DST_UPDATE_MODS_ON_START must be 0 or 1"; exit 1 ;;
+    esac
+
     # create a default server config if there is none
-    if [ ! -d "${DST_USER_DATA_PATH}/DoNotStarveTogether" ]; then
+    if [ ! -d "${DST_USER_DATA_PATH}/DoNotStarveTogether/Cluster_1" ]; then
         echo "Creating default server config..."
-	mkdir -p "${DST_USER_DATA_PATH}"
-        cp -r /opt/dst_default_config/* "${DST_USER_DATA_PATH}"
-        touch "${DST_USER_DATA_PATH}/DoNotStarveTogether/Cluster_1/cluster_token.txt"
+        mkdir -p "${DST_USER_DATA_PATH}"
+        cp -an /opt/dst_default_config/. "${DST_USER_DATA_PATH}/"
     fi
 
     # fill cluster token from environment variable
     if [ -n "${DST_CLUSTER_TOKEN:-}" ]; then
-	echo "Filling cluster token from environment variable"
-	printf "%s" "${DST_CLUSTER_TOKEN}" > "${FILE_CLUSTER_TOKEN}"
+        echo "Filling cluster token from environment variable"
+        printf "%s" "${DST_CLUSTER_TOKEN}" > "${FILE_CLUSTER_TOKEN}"
     fi
 
     # check cluster token file format
-    if [ ! -f "${FILE_CLUSTER_TOKEN}" ]; then
+    if [ ! -s "${FILE_CLUSTER_TOKEN}" ]; then
+        touch "${FILE_CLUSTER_TOKEN}"
         >&2 echo "Please fill in \`DoNotStarveTogether/Cluster_1/cluster_token.txt\` with your cluster token and restart server!"
-        exit
-    else
-        if [ -z "$(tail -c 1 "${FILE_CLUSTER_TOKEN}")" ]; then
-            # the cluster_token.txt needs to be terminated without newline, try to fix
-            mv "${FILE_CLUSTER_TOKEN}" /tmp/cluster_token.txt
-            tr -d '\n' < /tmp/cluster_token.txt > "${FILE_CLUSTER_TOKEN}"
-            rm -f /tmp/cluster_token.txt
-        fi
+        exit 1
     fi
+    # Normalize pasted tokens, including Windows line endings, without logging them.
+    cluster_token="$(tr -d '\r\n' < "${FILE_CLUSTER_TOKEN}")"
+    if [ -z "${cluster_token}" ]; then
+        echo >&2 "Cluster token must not be empty"
+        exit 1
+    fi
+    printf '%s' "${cluster_token}" > "${FILE_CLUSTER_TOKEN}"
+    unset cluster_token
 
     # fix config file permission
     chown -R "${DST_USER}:${DST_GROUP}" "${DST_USER_DATA_PATH}"
@@ -52,8 +58,10 @@ if [ "$1" == "dontstarve_dedicated_server_nullrenderer" ] || [ "$1" == "supervis
 
     # Update game
     # note that the update process modifies (resets) the mods folder so we symlink that later
-    echo "Updating server..."
-    steamcmd +runscript /opt/steamcmd_scripts/install_dst_server
+    if [ "${DST_UPDATE_ON_START:-1}" = "1" ]; then
+        echo "Updating server..."
+        steamcmd +runscript /opt/steamcmd_scripts/install_dst_server
+    fi
 
     # if there are no mods config, use the one that comes with the server
     if [ ! -d "${DIR_MODS_USER}" ]; then
@@ -69,14 +77,15 @@ if [ "$1" == "dontstarve_dedicated_server_nullrenderer" ] || [ "$1" == "supervis
     # update mods
     # Note: cluster-agnostic downloading is somehow broken
     # https://forums.kleientertainment.com/forums/topic/128188-what-is-ugc/?do=findComment&comment=1440420
-    echo "Updating mods..."
-    su --preserve-environment --group "${DST_GROUP}" -c "dontstarve_dedicated_server_nullrenderer -persistent_storage_root \"${DST_USER_DATA_PATH}\" -ugc_directory \"${DST_USER_DATA_PATH}\"/ugc -cluster Cluster_1 -only_update_server_mods" "${DST_USER}"
+    chown -R "${DST_USER}:${DST_GROUP}" "${DIR_MODS_USER}"
+    if [ "${DST_UPDATE_MODS_ON_START:-1}" = "1" ]; then
+        echo "Updating mods..."
+        su --preserve-environment --group "${DST_GROUP}" -c "dontstarve_dedicated_server_nullrenderer -persistent_storage_root \"${DST_USER_DATA_PATH}\" -ugc_directory \"${DST_USER_DATA_PATH}\"/ugc -cluster Cluster_1 -only_update_server_mods" "${DST_USER}"
+    fi
 
     # remove any existing supervisor socket
     rm -f /var/run/supervisor.sock
 
-    # create the unix socket file for supervisor
-    touch /var/run/supervisor.sock
 fi
 
 exec "$@"

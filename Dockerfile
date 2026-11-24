@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=debian:buster-slim
+ARG BASE_IMAGE=docker.io/library/debian:trixie-slim
 FROM $BASE_IMAGE
 LABEL maintainer="James Swineson <docker@public.swineson.me>"
 
@@ -13,11 +13,13 @@ ARG DST_GROUP=dst
 ARG DST_USER_DATA_PATH=/data
 
 # install packages
-RUN dpkg --add-architecture i386 \
+RUN test "$(dpkg --print-architecture)" = amd64 \
+    && dpkg --add-architecture i386 \
     && apt-get update -y \
-    && apt-get install -y --no-install-recommends ca-certificates lib32stdc++6 libcurl3-gnutls:i386 libcurl3-gnutls wget tar supervisor \
-    && (apt-get install -y --no-install-recommends lib32gcc-s1 || apt-get install -y --no-install-recommends lib32gcc1) \
-    && apt-get autoremove -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates libc6:i386 libgcc-s1 libgcc-s1:i386 \
+        libstdc++6 libstdc++6:i386 libcurl3t64-gnutls libcurl3t64-gnutls:i386 \
+        wget tar supervisor \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,7 +35,7 @@ RUN test -e "${STEAMCMD_PATH}" && echo "Steamcmd detected" \
     || ( \
     echo "Installing steamcmd" \
     && mkdir -p /opt/steamcmd \
-    && wget "${STEAMCMD_URL}" -O /tmp/steamcmd.tar.gz \
+    && wget --tries=3 --timeout=60 "${STEAMCMD_URL}" -O /tmp/steamcmd.tar.gz \
     && tar -xvzf /tmp/steamcmd.tar.gz -C /opt/steamcmd \
     && rm -rf /tmp/* \
     )
@@ -47,7 +49,13 @@ RUN chmod +x /usr/local/bin/*
 # install Don't Starve Together server
 RUN mkdir -p /opt/dst_server \
     && chown -R "${DST_USER}:${DST_GROUP}" /opt/dst_server \
-    && ( test "${DST_DOWNLOAD}" = "1" && steamcmd +runscript /opt/steamcmd_scripts/install_dst_server_initial || echo "Skipping DST server download" ) \
+    && if [ "${DST_DOWNLOAD}" = "1" ]; then \
+        steamcmd +runscript /opt/steamcmd_scripts/install_dst_server_initial; \
+    elif [ "${DST_DOWNLOAD}" = "0" ]; then \
+        echo "Skipping DST server download"; \
+    else \
+        echo >&2 "DST_DOWNLOAD must be 0 or 1"; exit 1; \
+    fi \
     && rm -rf /root/Steam /root/.steam
 
 # install default config
@@ -55,13 +63,17 @@ COPY dst_default_config /opt/dst_default_config/
 RUN chown -R "${DST_USER}:${DST_GROUP}" /opt/dst_default_config
 
 # pass essential environment variables into the container
-ENV STEAMCMD_PATH=$STEAMCMD_PATH
-ENV DST_USER=$DST_USER
-ENV DST_GROUP=$DST_GROUP
-ENV DST_USER_DATA_PATH=$DST_USER_DATA_PATH
+ENV STEAMCMD_PATH=${STEAMCMD_PATH} \
+    DST_USER=${DST_USER} \
+    DST_GROUP=${DST_GROUP} \
+    DST_USER_DATA_PATH=${DST_USER_DATA_PATH} \
+    DST_SERVER_ARCH=amd64 \
+    LANG=${LANG} \
+    LC_ALL=${LC_ALL}
 VOLUME [ "${DST_USER_DATA_PATH}" ]
 
 EXPOSE 10999-11000/udp 12346-12347/udp
+STOPSIGNAL SIGTERM
 ENTRYPOINT [ "entrypoint.sh" ]
 CMD ["supervisord", "-c", "/etc/supervisor/supervisor.conf", "-n"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD [ "healthcheck.sh" ]

@@ -1,0 +1,40 @@
+name: Container checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      download_game:
+        description: Also build the full image (requires Steam connectivity)
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  podman:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman shellcheck
+      - name: Check scripts
+        run: |
+          for script in scripts_system/*; do bash -n "$script"; done
+          shellcheck scripts_system/*
+      - name: Build slim image
+        run: podman build --format docker --build-arg DST_DOWNLOAD=0 -t localhost/dst-server:ci .
+      - name: Check container startup, health, restart and shutdown
+        run: python3 tests/podman_smoke.py localhost/dst-server:ci
+      - name: Build full image
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.download_game }}
+        run: podman build --format docker --build-arg DST_DOWNLOAD=1 -t localhost/dst-server:full .

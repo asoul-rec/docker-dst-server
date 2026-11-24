@@ -1,11 +1,24 @@
-version: '3.5'
 services:
   dst-server:
-     image: jamesits/dst-server:latest
-     restart: "on-failure:5"
-     ports:
-        - "10999-11000:10999-11000/udp"
-        - "12346-12347:12346-12347/udp"
-     volumes:
-        - ~/.klei/DoNotStarveTogether:/data
-     stop_grace_period: 6m
+    image: ${DST_IMAGE:-localhost/dst-server:latest}
+    build:
+      context: .
+      args:
+        DST_DOWNLOAD: ${DST_DOWNLOAD:-0}
+    restart: "on-failure:5"
+    environment:
+      DST_SERVER_ARCH: ${DST_SERVER_ARCH:-amd64}
+      DST_CLUSTER_TOKEN: ${DST_CLUSTER_TOKEN:-}
+      DST_UPDATE_ON_START: ${DST_UPDATE_ON_START:-1}
+      DST_UPDATE_MODS_ON_START: ${DST_UPDATE_MODS_ON_START:-1}
+    ports:
+      - "10999-11000:10999-11000/udp"
+      - "12346-12347:12346-12347/udp"
+    volumes:
+      - ${DST_DATA_DIR:-./data}:/data:Z
+      - dst-game:/opt/dst_server
+    stop_signal: SIGTERM
+    stop_grace_period: 6m
+
+volumes:
+  dst-game:

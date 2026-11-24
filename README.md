@@ -1,53 +1,101 @@
 # Don't Starve Together Dedicated Server Docker Image
 
-They write their server setup instructions like sh*t, so we made this Docker image to simplify things.
+Don't Starve Together dedicated server with a persistent cluster, Master and Caves
+shards, automatic game/mod updates, and Supervisor process management.
 
 Please read the whole document before putting your hands on your server. 
 
-[![Build Status](https://dev.azure.com/nekomimiswitch/General/_apis/build/status/docker-dst-server?branchName=master)](https://dev.azure.com/nekomimiswitch/General/_build/latest?definitionId=80&branchName=master)
+This fork builds on Debian 13 (`trixie-slim`, glibc 2.41), runs the 64-bit server
+by default, and includes the 32-bit libraries needed by SteamCMD and the optional
+`DST_SERVER_ARCH=x86` game binary. Build your own image to use these changes.
 
 ----------
 
 ## Versioning
 
-The DST server code changes a lot. We offer multiple variants (tags) on [Docker Hub](https://hub.docker.com/r/jamesits/dst-server/):
+* The default build (`DST_DOWNLOAD=1`) includes the game files. A failed game
+  download fails the build.
+* `--build-arg DST_DOWNLOAD=0` builds a smaller image containing SteamCMD and the
+  runtime libraries. The game downloads on first startup. Mount a volume at
+  `/opt/dst_server` to keep that download across container replacements.
+* Both builds update the game and mods on startup by default. To use an existing
+  installation without contacting Steam for updates, set `DST_UPDATE_ON_START=0`
+  and `DST_UPDATE_MODS_ON_START=0`. This does not put the game itself into offline
+  mode; that is controlled by `offline_cluster` in `cluster.ini`.
 
-* `latest` or `vanilla` are less frequently updated images, recommended for day-to-day use
-* `nightly` is a nightly built image, so it (hopefully) comes with the latest server code
-* `steamcmd-rebase` works the same way as `latest` but is based on [`cm2network/steamcmd:root`](https://hub.docker.com/r/cm2network/steamcmd)
+The historical `jamesits/dst-server` tags belong to the original upstream
+publisher and do not contain this fork's changes. The supplied Compose file now
+builds this checkout and uses `localhost/dst-server:latest`.
+Compose defaults to the slim build and caches the game in its `dst-game` named
+volume. Set `DST_DOWNLOAD=1` to embed the game in the image instead.
 
-All variants except `nightly` also have a `-slim` tagged version which does not come with DST server pre-installed; required files will be downloaded every time the container is launched. The `-slim` versions cannot be launched offline.
+## Features and scope
+
+| Capability | Configuration / behavior |
+| --- | --- |
+| Ground and caves | Supervisor runs `Master` and `Caves` in one container, under an unprivileged game user. |
+| Persistent saves | `/data/DoNotStarveTogether/Cluster_1` holds settings, saves, logs, tokens and mod configuration; `/data/ugc` holds Workshop content. |
+| Initial configuration | Copies defaults when `Cluster_1` is absent; accepts a token file or `DST_CLUSTER_TOKEN`. |
+| Game and Workshop updates | SteamCMD anonymously installs app `343050`; the game updates mods before launching both shards. |
+| Mod collections | Add `ServerModSetup` / `ServerModCollectionSetup` calls in `mods/dedicated_server_mods_setup.lua`, and enable mods in each shard's `modoverrides.lua`. |
+| World and access settings | `cluster.ini`, per-shard `worldgenoverride.lua`, `adminlist.txt`, `blocklist.txt`, `whitelist.txt`. |
+| Process supervision | Restarts unexpected game exits, exposes stdout/stderr, and checks that both shards are `RUNNING`. |
+| Graceful shutdown | Supervisor sends SIGINT to both shards and allows up to 300 seconds for saving. |
+
+The bundled defaults enable Endless mode, PvP, 64 player slots, pause when empty,
+and six save snapshots. Adjust these for your hardware and intended gameplay.
+This image manages one fixed `Cluster_1` with two shards. It does not include a
+web panel, scheduled updates/backups, automatic cluster scaling, or native ARM
+support. Health checks test processes, not Klei authentication or public reachability.
 
 ## Running
 
 ### Prerequisites
 
- * Linux x86_64 and runs Docker (18.05.0-ce or later).
+ * Linux x86_64 with Podman or Docker. ARM requires external x86 emulation and is not tested.
  * You may need a public IP to make your server accessable from Internet. 
  * You need 4 UDP ports exposed to the public network. (See FAQ for details.)
  * CPU: 1 core is somewhat enough for a small-scale server (but don't try 60 ticks, start from 15 or 30).
- * Memory: We recommend reserving 1GiB Memory for the server, plus 60MiB per active user.
- * Disk size: the Docker image takes 1.5GiB, and you need at least another 5MiB for maps, configs and logs. 4GiB available disk space is recommended.
+ * Memory: budget for both shards and world generation, with extra headroom for mods and players. Monitor the real workload with `podman stats`; a small idle cluster does not establish the capacity for 64 active players.
+ * Disk: allow space for the runtime image, several GB of game files, Workshop downloads, saves and build layers. Do not use the old 1.5 GiB image estimate for current game versions.
 
 ### Start server
 
-Let's assume you are saving your server config and status to `${HOME}/.klei/DoNotStarveTogether`. (This is the default location when it is running outside Docker, so we'll use this as an example. If you want to save it to other location, just mount that directory read-write to the /data folder of the container.)
-
-Start server:
+Build and run with rootless Podman (named volumes avoid bind-mount ownership setup):
 
 ```shell
-docker run -v ${HOME}/.klei/DoNotStarveTogether:/data -p 10999-11000:10999-11000/udp -p 12346-12347:12346-12347/udp -e "DST_SERVER_ARCH=amd64" -it jamesits/dst-server:latest
+podman build --format docker --build-arg DST_DOWNLOAD=0 -t localhost/dst-server:latest .
+podman volume create dst-data
+podman volume create dst-game
+podman run -d --name dst-server --stop-timeout 360 \
+  -v dst-data:/data -v dst-game:/opt/dst_server \
+  -p 10999-11000:10999-11000/udp -p 12346-12347:12346-12347/udp \
+  --env-file .env localhost/dst-server:latest
+podman logs -f dst-server
 ```
 
-If you use `docker-compose`, an [example config](https://github.com/Jamesits/docker-dst-server/blob/master/docker-compose.yml) is provided.
+Before running, copy `.env.example` to `.env` and fill in `DST_CLUSTER_TOKEN`, or
+provide `DoNotStarveTogether/Cluster_1/cluster_token.txt` inside the data volume.
+You can inspect or edit rootless volume files with `podman unshare`.
+
+For Compose, install a Compose provider (`podman-compose` or Docker Compose),
+then run `podman compose up --build -d`. Docker users can run
+`docker compose up --build -d`. The Compose example stores saves under `./data`
+(override `DST_DATA_DIR` in `.env` to reuse your old data directory). A host path
+that contains `Cluster_1` directly must instead be mounted at
+`/data/DoNotStarveTogether`; `/data` contains the additional `DoNotStarveTogether`
+directory. The `:Z` mount option supports private SELinux labeling on Linux.
+
+The Compose file preserves game downloads in its `dst-game` volume across
+container replacements. Do not remove that volume when you only want to rebuild
+the runtime image. Saves are kept separately under `DST_DATA_DIR`.
 
 ### Stop server
 
-Just press `Ctrl+C` and wait a little while to let itself spin down. (If the server is saving data, don't press ^C twice to force kill the server.)
-
-To programmatically shut down the server, send a SIGINT to the `supervisord` process. 
-
-Note: the server may take up to ~5min to save map and fully shut down.
+Run `podman stop --time 360 dst-server` (or `docker stop --time 360 dst-server`).
+Supervisor forwards SIGINT to each game process to allow saving. The Compose
+file already sets a six-minute grace period. Allow up to five minutes for large
+worlds to finish saving.
  
 ## Server Configuration
 
@@ -57,14 +105,8 @@ Creating default server config...
 Please fill in `DoNotStarveTogether/Cluster_1/cluster_token.txt` with your cluster token and restart server!
 ```
 
-To generate a cluster token (as of 2019-11-02):
-
-1. Open a genuine copy of Don't Starve Together client and log in
-2. Click "Play" to go to the main menu
-3. click "account" button on the bottom left of the main menu
-4. In the popup browser, click "GAMES" on the top nav bar
-5. Click "Don't Starve Toegther Servers" button on the top right
-6. Scroll down to "ADD NEW SERVER" section, fill in a server name (it is not important), and copy the generated token
+Generate a server token from your [Klei account](https://accounts.klei.com/),
+under the Don't Starve Together server section.
 
 The token looks like `pds-g^aaaaaaaaa-q^jaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=`. Then either set `DST_CLUSTER_TOKEN` environment variable during `docker run`, or paste the token into `your_data_directory/DoNotStarveTogether/Cluster_1/cluster_token.txt`.
 
@@ -74,21 +116,49 @@ After you finish this, re-run start server command, and the server should be run
 
 ## Build Docker image locally
 
-(In most cases you don't need this; just pull the prebuilt image from Docker Hub.)
+Build this checkout to include this fork's updated runtime:
 
 ```shell
-git clone https://github.com/Jamesits/docker-dst-server.git docker-dst-server
+git clone https://github.com/asoul-rec/docker-dst-server.git docker-dst-server
 cd docker-dst-server
-docker build . -t dst-server:latest
+podman build --format docker -t localhost/dst-server:latest .
+# Smaller build, without downloading the game at build time:
+podman build --format docker --build-arg DST_DOWNLOAD=0 -t localhost/dst-server:slim .
 ```
 
 There are some arguments you can set via `--build-arg`:
 
-* `BASE_IMAGE`: the `FROM` image (recent Debian or Ubuntu based images are supported)
+* `BASE_IMAGE`: the `FROM` image (default `docker.io/library/debian:trixie-slim`; dependencies target Debian 13)
 * `STEAMCMD_PATH`: where is `steamcmd.sh` in the base image
 * `DST_DOWNLOAD`: set to `1` to embed DST server into the image
 * `DST_USER`: the user to run server as (inside container)
 * `DST_GROUP`: the group to run server as (inside container)
+
+Runtime environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DST_CLUSTER_TOKEN` | empty | Optional alternative to a populated token file. Empty or newline-only tokens fail startup before downloading. |
+| `DST_SERVER_ARCH` | `amd64` | Game binary selection: `amd64` or `x86`; SteamCMD remains 32-bit. |
+| `DST_UPDATE_ON_START` | `1` | Set to `0` to skip the startup game update; game files must already exist. |
+| `DST_UPDATE_MODS_ON_START` | `1` | Set to `0` to skip the startup Workshop update; needed mods must already exist. |
+
+## Validation and CI
+
+```shell
+python3 tests/podman_smoke.py localhost/dst-server:slim
+```
+
+The smoke test uses the real container scripts and Supervisor with small fake
+game/Steam executables. It checks tokens, failed updates, architecture selection,
+mod ownership, health transitions, restart persistence and SIGINT shutdown. It
+does not test the actual game, Steam downloads, Workshop or public connections.
+Use a valid Klei token and a real game client for online acceptance testing.
+
+GitHub Actions builds the slim image and runs ShellCheck and these Podman tests
+on pushes, pull requests and a weekly schedule. Manual runs can also build the
+full image. CI does not publish images. The old Azure/DaoCloud jobs referencing
+the original publisher's credentials have been removed.
 
 
 ## Known Issues

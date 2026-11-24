@@ -1,5 +1,10 @@
 # Project specific ignored files
 cluster_token.txt
+.env
+.env.*
+!.env.example
+/data/
+__pycache__/
 
 # Created by https://www.gitignore.io/api/macos,windows,visualstudiocode
 
