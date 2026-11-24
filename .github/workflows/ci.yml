@@ -1,4 +1,4 @@
-name: Container checks
+name: Build, test and publish containers
 
 on:
   push:
@@ -15,10 +15,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   podman:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,9 +39,45 @@ jobs:
           for script in scripts_system/*; do bash -n "$script"; done
           shellcheck scripts_system/*
       - name: Build slim image
-        run: podman build --format docker --build-arg DST_DOWNLOAD=0 -t localhost/dst-server:ci .
+        run: |
+          podman build --format docker --build-arg DST_DOWNLOAD=0 \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t localhost/dst-server:ci .
       - name: Check container startup, health, restart and shutdown
         run: python3 tests/podman_smoke.py localhost/dst-server:ci
       - name: Build full image
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.download_game }}
-        run: podman build --format docker --build-arg DST_DOWNLOAD=1 -t localhost/dst-server:full .
+        run: |
+          podman build --format docker --build-arg DST_DOWNLOAD=1 \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t localhost/dst-server:full .
+      - name: Log in to GHCR
+        if: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io \
+            --authfile "${RUNNER_TEMP}/ghcr-auth.json" \
+            --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish images to GHCR
+        if: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        env:
+          PUBLISH_FULL: ${{ github.event_name == 'workflow_dispatch' && inputs.download_game }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          auth_file="${RUNNER_TEMP}/ghcr-auth.json"
+          for tag in latest slim "sha-${GITHUB_SHA}"; do
+            podman push --authfile "$auth_file" localhost/dst-server:ci "docker://${image}:${tag}"
+            printf -- '- %s:%s\n' "$image" "$tag" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$PUBLISH_FULL" = "true" ]; then
+            for tag in full "full-sha-${GITHUB_SHA}"; do
+              podman push --authfile "$auth_file" localhost/dst-server:full "docker://${image}:${tag}"
+              printf -- '- %s:%s\n' "$image" "$tag" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
+      - name: Remove registry credentials
+        if: ${{ always() }}
+        run: rm -f "${RUNNER_TEMP}/ghcr-auth.json"

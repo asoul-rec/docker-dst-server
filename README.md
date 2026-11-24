@@ -7,7 +7,8 @@ Please read the whole document before putting your hands on your server.
 
 This fork builds on Debian 13 (`trixie-slim`, glibc 2.41), runs the 64-bit server
 by default, and includes the 32-bit libraries needed by SteamCMD and the optional
-`DST_SERVER_ARCH=x86` game binary. Build your own image to use these changes.
+`DST_SERVER_ARCH=x86` game binary. Build locally or use the GHCR images published
+by this repository's CI.
 
 ----------
 
@@ -28,6 +29,29 @@ publisher and do not contain this fork's changes. The supplied Compose file now
 builds this checkout and uses `localhost/dst-server:latest`.
 Compose defaults to the slim build and caches the game in its `dst-game` named
 volume. Set `DST_DOWNLOAD=1` to embed the game in the image instead.
+
+CI publishes to `ghcr.io/<owner>/<repository>` using the current repository's
+lowercase name. For this repository, the image is
+`ghcr.io/asoul-rec/docker-dst-server`:
+
+| Tag | Contents |
+| --- | --- |
+| `latest`, `slim` | Tested slim image from the default branch. |
+| `sha-<commit>` | Slim image tagged with the full Git commit SHA. |
+| `full`, `full-sha-<commit>` | Image with game files, published when a manual workflow run on the default branch enables `download_game`. |
+
+After a successful publishing workflow, pull the slim image with:
+
+```shell
+podman pull ghcr.io/asoul-rec/docker-dst-server:slim
+```
+
+Use that image instead of `localhost/dst-server:latest` in the `podman run`
+example below, or set `DST_IMAGE` to the GHCR reference in `.env` and run
+`podman compose pull` followed by `podman compose up -d --no-build`.
+GHCR initially creates private packages; set the package visibility to public
+for anonymous pulls, or authenticate to access a private package. See
+[GitHub's Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
 ## Features and scope
 
@@ -157,8 +181,13 @@ Use a valid Klei token and a real game client for online acceptance testing.
 
 GitHub Actions builds the slim image and runs ShellCheck and these Podman tests
 on pushes, pull requests and a weekly schedule. Manual runs can also build the
-full image. CI does not publish images. The old Azure/DaoCloud jobs referencing
-the original publisher's credentials have been removed.
+full image. After successful builds and tests on the default branch, CI pushes
+the built images directly to GHCR using `GITHUB_TOKEN` with `packages: write`.
+Pull requests and other branches only build and test; they do not log in or
+publish. Authentication is stored in a temporary file and removed even if a
+step fails. No personal access token or Docker Hub credentials are needed.
+The old Azure/DaoCloud jobs referencing the original publisher's credentials
+have been removed.
 
 
 ## Known Issues
